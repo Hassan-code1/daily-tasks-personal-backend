@@ -5,8 +5,9 @@ A high-performance, secure, and production-ready Node.js/Express API that powers
 ## 🚀 Features
 
 - **JWT Authentication**: Secure user registration and login.
-- **Task Management**: Full CRUD (Create, Read, Update, Delete) operations.
-- **Aggregation Pipeline**: Efficiently calculates daily task completion ratios using MongoDB aggregation.
+- **Task Management**: Full CRUD operations with support for **Daily Recurring Tasks**.
+- **Per-Day Completion Tracking**: Uses a secondary `TaskCompletion` model to track infinite recurrence completion independently per day.
+- **Aggregation Pipeline**: Efficiently calculates daily task completion ratios using MongoDB aggregation (merging static and dynamic tasks).
 - **Security Hardened**: 
   - `Helmet.js` for secure HTTP headers.
   - `Express-Rate-Limit` to prevent Brute-force and DDoS attacks.
@@ -74,11 +75,11 @@ A high-performance, secure, and production-ready Node.js/Express API that powers
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/tasks?date=YYYY-MM-DD` | Get all tasks for a specific date |
+| `GET` | `/api/tasks?date=YYYY-MM-DD` | Get all tasks for a specific date (merges standard and recurring) |
 | `GET` | `/api/tasks/summary?month=M&year=YYYY` | Get monthly completion summary |
-| `POST` | `/api/tasks` | Create a new task |
-| `PUT` | `/api/tasks/:id` | Update a task (title, description, completed) |
-| `DELETE` | `/api/tasks/:id` | Delete a task |
+| `POST` | `/api/tasks` | Create a new task (supports `isDaily: boolean`) |
+| `PUT` | `/api/tasks/:id` | Update a task (handles per-day completion for recurring tasks) |
+| `DELETE` | `/api/tasks/:id?mode=single\|all&date=YYYY-MM-DD` | Delete a task (supports hiding a single day vs deleting entire series) |
 
 ---
 

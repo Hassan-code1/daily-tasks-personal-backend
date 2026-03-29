@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { body, query, validationResult } = require('express-validator');
 const Task = require('../models/Task');
+const TaskCompletion = require('../models/TaskCompletion');
 const auth = require('../middleware/auth');
 
 const validate = (req, res) => {
@@ -40,11 +41,13 @@ router.get('/summary', [
     const end = new Date(Date.UTC(year, month, 1));
 
     try {
-        const summary = await Task.aggregate([
+        // 1. Regular task summary (standard aggregation)
+        const regularSummary = await Task.aggregate([
             {
                 $match: {
                     owner: new mongoose.Types.ObjectId(req.userId),
-                    date: { $gte: start, $lt: end }
+                    date: { $gte: start, $lt: end },
+                    isDaily: false
                 }
             },
             {
@@ -54,10 +57,60 @@ router.get('/summary', [
                     completed: { $sum: { $cond: ['$completed', 1, 0] } },
                 },
             },
-            { $project: { _id: 0, date: '$_id', total: 1, completed: 1 } },
-            { $sort: { date: 1 } },
         ]);
-        res.json(summary);
+
+        // 2. Daily tasks applicable to this month
+        const dailyTasks = await Task.find({
+            owner: req.userId,
+            isDaily: true,
+            date: { $lt: end }
+        }).lean();
+
+        // 3. Daily task completions for this month
+        const completions = await TaskCompletion.find({
+            owner: req.userId,
+            date: { $gte: start, $lt: end }
+        }).lean();
+
+        // 4. Merge results manually for each day of the month
+        const summaryMap = {};
+        regularSummary.forEach(s => {
+            summaryMap[s._id] = { total: s.total, completed: s.completed };
+        });
+
+        // Iterate days
+        const daysInMonth = new Date(year, month, 0).getDate();
+        for (let d = 1; d <= daysInMonth; d++) {
+            const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+            const targetDate = new Date(Date.UTC(year, month - 1, d));
+
+            // Add applicable daily tasks
+            const activeDaily = dailyTasks.filter(t =>
+                t.date <= targetDate &&
+                !t.excludedDates.some(ex => ex.getTime() === targetDate.getTime())
+            );
+
+            if (activeDaily.length > 0) {
+                if (!summaryMap[dateStr]) summaryMap[dateStr] = { total: 0, completed: 0 };
+                summaryMap[dateStr].total += activeDaily.length;
+
+                // Count completions
+                activeDaily.forEach(task => {
+                    const done = completions.find(c =>
+                        c.taskId.toString() === task._id.toString() &&
+                        c.date.getTime() === targetDate.getTime() &&
+                        c.completed
+                    );
+                    if (done) summaryMap[dateStr].completed += 1;
+                });
+            }
+        }
+
+        const finalSummary = Object.entries(summaryMap).map(([date, val]) => ({
+            date, ...val
+        })).sort((a, b) => a.date.localeCompare(b.date));
+
+        res.json(finalSummary);
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error' });
@@ -76,11 +129,30 @@ router.get('/', [
     dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
     try {
-        const tasks = await Task.find({
-            owner: req.userId,
-            date: { $gte: dayStart, $lt: dayEnd },
-        }).lean().sort({ createdAt: 1 });
-        res.json(tasks);
+        const [regularTasks, dailyTasks, completions] = await Promise.all([
+            Task.find({
+                owner: req.userId,
+                date: { $gte: dayStart, $lt: dayEnd },
+                isDaily: false,
+            }).lean().sort({ createdAt: 1 }),
+            Task.find({
+                owner: req.userId,
+                isDaily: true,
+                date: { $lte: dayStart },
+                excludedDates: { $ne: dayStart },
+            }).lean().sort({ createdAt: 1 }),
+            TaskCompletion.find({
+                owner: req.userId,
+                date: dayStart,
+            }).lean(),
+        ]);
+
+        const mergedDaily = dailyTasks.map(t => {
+            const status = completions.find(c => c.taskId.toString() === t._id.toString());
+            return { ...t, completed: status ? status.completed : false };
+        });
+
+        res.json([...regularTasks, ...mergedDaily]);
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
     }
@@ -90,6 +162,7 @@ router.get('/', [
 router.post('/', [
     body('title').notEmpty().trim().isLength({ max: 200 }).withMessage('Title required'),
     body('date').isISO8601().withMessage('Valid date required'),
+    body('isDaily').optional().isBoolean(),
     body('description').optional().trim().isLength({ max: 1000 }),
 ], async (req, res) => {
     if (!validate(req, res)) return;
@@ -103,6 +176,7 @@ router.post('/', [
             title: req.body.title,
             description: req.body.description || '',
             date: new Date(req.body.date),
+            isDaily: !!req.body.isDaily,
             completed: false,
             owner: req.userId,
         });
@@ -121,27 +195,40 @@ router.put('/:id', [
     if (!validate(req, res)) return;
 
     try {
-        // Check if the existing task is in the past before updating
-        const existing = await Task.findOne({ _id: req.params.id, owner: req.userId }).lean();
+        const existing = await Task.findOne({ _id: req.params.id, owner: req.userId });
         if (!existing) return res.status(404).json({ error: 'Task not found' });
+
+        // For daily tasks, updates to 'completed' are day-specific completions
+        if (existing.isDaily && req.body.completed !== undefined) {
+            const [y, m, d] = req.body.date.split('-').map(Number);
+            const targetDate = new Date(Date.UTC(y, m - 1, d));
+
+            const completion = await TaskCompletion.findOneAndUpdate(
+                { taskId: existing._id, date: targetDate, owner: req.userId },
+                { $set: { completed: req.body.completed } },
+                { upsert: true, new: true }
+            );
+            return res.json({ ...existing.toObject(), completed: completion.completed });
+        }
+
         if (isPastDate(existing.date)) {
             return res.status(403).json({ error: 'Cannot update tasks on past dates' });
         }
 
-        // Whitelist — prevent overriding owner/date via $set
         const allowed = {};
         if (req.body.title !== undefined) allowed.title = req.body.title;
         if (req.body.description !== undefined) allowed.description = req.body.description;
         if (req.body.completed !== undefined) allowed.completed = req.body.completed;
 
         const task = await Task.findOneAndUpdate(
-            { _id: req.params.id, owner: req.userId }, // scoped to owner
+            { _id: req.params.id, owner: req.userId },
             { $set: allowed },
             { new: true, runValidators: true }
         ).lean();
 
         res.json(task);
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
@@ -149,15 +236,34 @@ router.put('/:id', [
 // ─── DELETE /api/tasks/:id ────────────────────────────────────────────────────
 router.delete('/:id', async (req, res) => {
     try {
-        const existing = await Task.findOne({ _id: req.params.id, owner: req.userId }).lean();
+        const existing = await Task.findOne({ _id: req.params.id, owner: req.userId });
         if (!existing) return res.status(404).json({ error: 'Task not found' });
-        if (isPastDate(existing.date)) {
+
+        const mode = req.query.mode || 'all'; // 'single' (today only) or 'all' (entire series)
+        const targetDateStr = req.query.date; // YYYY-MM-DD for 'single' mode
+
+        if (existing.isDaily && mode === 'single' && targetDateStr) {
+            const [y, m, d] = targetDateStr.split('-').map(Number);
+            const targetDate = new Date(Date.UTC(y, m - 1, d));
+
+            await Task.updateOne(
+                { _id: existing._id },
+                { $addToSet: { excludedDates: targetDate } }
+            );
+            return res.json({ message: 'Task removed for this day' });
+        }
+
+        if (!existing.isDaily && isPastDate(existing.date)) {
             return res.status(403).json({ error: 'Cannot delete tasks from past dates' });
         }
 
-        await Task.deleteOne({ _id: req.params.id, owner: req.userId });
+        await Promise.all([
+            Task.deleteOne({ _id: req.params.id, owner: req.userId }),
+            TaskCompletion.deleteMany({ taskId: req.params.id })
+        ]);
         res.json({ message: 'Task deleted' });
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: 'Server error' });
     }
 });
