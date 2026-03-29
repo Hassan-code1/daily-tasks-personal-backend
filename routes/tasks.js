@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const express = require('express');
 const router = express.Router();
 const { body, query, validationResult } = require('express-validator');
@@ -40,7 +41,12 @@ router.get('/summary', [
 
     try {
         const summary = await Task.aggregate([
-            { $match: { owner: req.userId, date: { $gte: start, $lt: end } } },
+            {
+                $match: {
+                    owner: new mongoose.Types.ObjectId(req.userId),
+                    date: { $gte: start, $lt: end }
+                }
+            },
             {
                 $group: {
                     _id: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
@@ -64,7 +70,8 @@ router.get('/', [
 ], async (req, res) => {
     if (!validate(req, res)) return;
 
-    const dayStart = new Date(Date.UTC(...req.query.date.split('-').map((v, i) => i === 1 ? v - 1 : v)));
+    const [y, m, d] = req.query.date.split('-').map(Number);
+    const dayStart = new Date(Date.UTC(y, m - 1, d));
     const dayEnd = new Date(dayStart);
     dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
