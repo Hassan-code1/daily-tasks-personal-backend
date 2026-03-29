@@ -13,6 +13,15 @@ const validate = (req, res) => {
     return true;
 };
 
+// Helper: check if date is before today (midnight)
+const isPastDate = (date) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const target = new Date(date);
+    target.setHours(0, 0, 0, 0);
+    return target < today;
+};
+
 // Apply auth middleware to ALL task routes
 router.use(auth);
 
@@ -77,6 +86,10 @@ router.post('/', [
 ], async (req, res) => {
     if (!validate(req, res)) return;
 
+    if (isPastDate(req.body.date)) {
+        return res.status(403).json({ error: 'Cannot add tasks to past dates' });
+    }
+
     try {
         const task = await Task.create({
             title: req.body.title,
@@ -99,20 +112,26 @@ router.put('/:id', [
 ], async (req, res) => {
     if (!validate(req, res)) return;
 
-    // Whitelist — prevent overriding owner/date via $set
-    const allowed = {};
-    if (req.body.title !== undefined) allowed.title = req.body.title;
-    if (req.body.description !== undefined) allowed.description = req.body.description;
-    if (req.body.completed !== undefined) allowed.completed = req.body.completed;
-
     try {
+        // Check if the existing task is in the past before updating
+        const existing = await Task.findOne({ _id: req.params.id, owner: req.userId }).lean();
+        if (!existing) return res.status(404).json({ error: 'Task not found' });
+        if (isPastDate(existing.date)) {
+            return res.status(403).json({ error: 'Cannot update tasks on past dates' });
+        }
+
+        // Whitelist — prevent overriding owner/date via $set
+        const allowed = {};
+        if (req.body.title !== undefined) allowed.title = req.body.title;
+        if (req.body.description !== undefined) allowed.description = req.body.description;
+        if (req.body.completed !== undefined) allowed.completed = req.body.completed;
+
         const task = await Task.findOneAndUpdate(
             { _id: req.params.id, owner: req.userId }, // scoped to owner
             { $set: allowed },
             { new: true, runValidators: true }
         ).lean();
 
-        if (!task) return res.status(404).json({ error: 'Task not found' });
         res.json(task);
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
@@ -122,8 +141,13 @@ router.put('/:id', [
 // ─── DELETE /api/tasks/:id ────────────────────────────────────────────────────
 router.delete('/:id', async (req, res) => {
     try {
-        const task = await Task.findOneAndDelete({ _id: req.params.id, owner: req.userId });
-        if (!task) return res.status(404).json({ error: 'Task not found' });
+        const existing = await Task.findOne({ _id: req.params.id, owner: req.userId }).lean();
+        if (!existing) return res.status(404).json({ error: 'Task not found' });
+        if (isPastDate(existing.date)) {
+            return res.status(403).json({ error: 'Cannot delete tasks from past dates' });
+        }
+
+        await Task.deleteOne({ _id: req.params.id, owner: req.userId });
         res.json({ message: 'Task deleted' });
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
