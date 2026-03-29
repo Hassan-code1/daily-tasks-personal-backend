@@ -34,8 +34,9 @@ router.get('/summary', [
 
     const month = parseInt(req.query.month, 10);
     const year = parseInt(req.query.year, 10);
-    const start = new Date(year, month - 1, 1);
-    const end = new Date(year, month, 1);
+    // Use UTC for consistent matching with MongoDB storage
+    const start = new Date(Date.UTC(year, month - 1, 1));
+    const end = new Date(Date.UTC(year, month, 1));
 
     try {
         const summary = await Task.aggregate([
@@ -63,9 +64,9 @@ router.get('/', [
 ], async (req, res) => {
     if (!validate(req, res)) return;
 
-    const dayStart = new Date(req.query.date);
+    const dayStart = new Date(Date.UTC(...req.query.date.split('-').map((v, i) => i === 1 ? v - 1 : v)));
     const dayEnd = new Date(dayStart);
-    dayEnd.setDate(dayEnd.getDate() + 1);
+    dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
     try {
         const tasks = await Task.find({
